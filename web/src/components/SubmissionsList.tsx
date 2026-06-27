@@ -83,8 +83,8 @@ function SubmissionRow({
   isWinner?: boolean;
 }) {
   const { data, isLoading } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi,
+    address: contractAddress,
+    abi: aiJudgeAbi,
     functionName: "getSubmission",
     args: [bountyId, BigInt(index)],
     query: { enabled: true },
