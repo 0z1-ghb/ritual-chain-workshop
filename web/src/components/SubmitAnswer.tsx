@@ -1,97 +1,142 @@
 "use client";
 
 import { useState } from "react";
-import { useAccount } from "wagmi";
-import { useNow } from "@/hooks/useNow";
+import { useAccount, useWalletClient } from "wagmi";
+import { keccak256, encodeAbiParameters, parseAbiParameters, stringToHex } from "viem";
+import { writeContract } from "viem/actions";
+import type { Bounty } from "@/lib/bounty";
+import { canCommit, canReveal, getBountyStatus, STATUS_META } from "@/lib/bounty";
 import aiJudgeAbi from "@/abi/AIJudge";
 import { contractAddress } from "@/config/contract";
-import { ritualChain } from "@/config/wagmi";
-import { canSubmit, type Bounty } from "@/lib/bounty";
-import { useWriteTx } from "@/hooks/useWriteTx";
-import {
-  Card,
-  CardHeader,
-  CardBody,
-  Field,
-  Textarea,
-  Button,
-  TxStatus,
-} from "@/components/ui";
 
-const explorerBase = ritualChain.blockExplorers?.default.url;
+function saltHex(): `0x${string}` {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return `0x${Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
 
-export function SubmitAnswer({
-  bountyId,
-  bounty,
-  onSubmitted,
-}: {
-  bountyId: bigint;
-  bounty: Bounty;
-  onSubmitted: () => void;
-}) {
-  const { isConnected } = useAccount();
+export default function SubmitAnswer({ bounty, bountyId }: { bounty: Bounty; bountyId: bigint }) {
+  const { address } = useAccount();
+  const { data: walletClient } = useWalletClient();
   const [answer, setAnswer] = useState("");
-  const now = useNow();
-  const tx = useWriteTx(() => {
-    setAnswer("");
-    onSubmitted();
-  });
+  const [pending, setPending] = useState(false);
+  const [savedSalt, setSavedSalt] = useState<`0x${string}` | null>(null);
+  const [revealAnswer, setRevealAnswer] = useState("");
+  const [revealSalt, setRevealSalt] = useState("");
 
-  // Submission window closed — nothing to show.
-  if (!canSubmit(bounty, now / 1000)) return null;
+  const status = getBountyStatus(bounty);
+  const commitAllowed = canCommit(bounty);
+  const revealAllowed = canReveal(bounty);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!answer.trim() || !contractAddress) return;
+  const handleCommit = async () => {
+    if (!walletClient || !address || !answer.trim()) return;
+    setPending(true);
     try {
-      await tx.run({
+      const salt = saltHex();
+      const hash = keccak256(
+        encodeAbiParameters(
+          parseAbiParameters("string, bytes32, address, uint256"),
+          [answer, salt, address, bountyId],
+        ),
+      );
+      const tx = await writeContract(walletClient, {
         address: contractAddress,
         abi: aiJudgeAbi,
-        functionName: "submitAnswer",
-        args: [bountyId, answer.trim()],
-        chainId: ritualChain.id,
+        functionName: "submitCommitment",
+        args: [bountyId, hash],
       });
-    } catch {
-      /* surfaced via tx.state */
+      setSavedSalt(salt);
+      setAnswer("");
+      alert(`Committed! Save this salt to reveal later:\n${salt}\n\nTx: ${tx}`);
+    } catch (e: any) {
+      alert(e?.shortMessage ?? e?.message ?? "commit failed");
+    } finally {
+      setPending(false);
     }
-  }
+  };
+
+  const handleReveal = async () => {
+    if (!walletClient || !address || !revealAnswer.trim() || !revealSalt.trim()) return;
+    setPending(true);
+    try {
+      const salt = revealSalt.startsWith("0x") ? (revealSalt as `0x${string}`) : (`0x${revealSalt}` as `0x${string}`);
+      const tx = await writeContract(walletClient, {
+        address: contractAddress,
+        abi: aiJudgeAbi,
+        functionName: "revealAnswer",
+        args: [bountyId, revealAnswer, salt],
+      });
+      setRevealAnswer("");
+      setRevealSalt("");
+      alert(`Answer revealed! Tx: ${tx}`);
+    } catch (e: any) {
+      alert(e?.shortMessage ?? e?.message ?? "reveal failed");
+    } finally {
+      setPending(false);
+    }
+  };
 
   return (
-    <Card>
-      <CardHeader
-        title="Submit an answer"
-        subtitle="Open until the deadline. One entry, judged against the rubric."
-      />
-      <CardBody>
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <Field label="Your answer">
-            <Textarea
-              value={answer}
-              onChange={(e) => setAnswer(e.target.value)}
-              rows={5}
-              placeholder="Write your submission…"
-            />
-          </Field>
-          <Button
-            type="submit"
-            disabled={!isConnected || !answer.trim() || tx.isBusy}
-            className="w-full"
+    <div className="space-y-4 rounded border p-3">
+      <div className="text-xs font-medium uppercase tracking-wider text-zinc-500">
+        {STATUS_META[status].label}
+      </div>
+
+      {commitAllowed && (
+        <>
+          <textarea
+            className="w-full rounded border p-2 text-sm"
+            rows={3}
+            placeholder="Your confidential answer…"
+            value={answer}
+            onChange={(e) => setAnswer(e.target.value)}
+          />
+          <button
+            className="rounded bg-green-600 px-4 py-1.5 text-sm text-white disabled:opacity-40"
+            disabled={pending || !answer.trim()}
+            onClick={handleCommit}
           >
-            {tx.isBusy ? "Submitting…" : "Submit answer"}
-          </Button>
-          {!isConnected && (
-            <p className="text-xs text-zinc-500">
-              Connect your wallet to submit.
+            {pending ? "Submitting…" : "Submit Commitment (Hash)"}
+          </button>
+          {savedSalt && (
+            <p className="mt-1 text-xs text-amber-600 break-all">
+              🔑 Saved salt: {savedSalt} — keep it to reveal later!
             </p>
           )}
-          <TxStatus
-            state={tx.state}
-            error={tx.error}
-            hash={tx.hash}
-            explorerBase={explorerBase}
+        </>
+      )}
+
+      {revealAllowed && (
+        <>
+          <textarea
+            className="w-full rounded border p-2 text-sm"
+            rows={3}
+            placeholder="Your original answer…"
+            value={revealAnswer}
+            onChange={(e) => setRevealAnswer(e.target.value)}
           />
-        </form>
-      </CardBody>
-    </Card>
+          <input
+            className="w-full rounded border p-2 text-sm font-mono"
+            placeholder="Salt (hex) you saved during commit"
+            value={revealSalt}
+            onChange={(e) => setRevealSalt(e.target.value)}
+          />
+          <button
+            className="rounded bg-amber-600 px-4 py-1.5 text-sm text-white disabled:opacity-40"
+            disabled={pending || !revealAnswer.trim() || !revealSalt.trim()}
+            onClick={handleReveal}
+          >
+            {pending ? "Revealing…" : "Reveal Answer"}
+          </button>
+        </>
+      )}
+
+      {!commitAllowed && !revealAllowed && (
+        <p className="text-sm text-zinc-400">
+          {status === "judged" || status === "finalized"
+            ? "This bounty is closed for submissions."
+            : "Waiting for reveal phase…"}
+        </p>
+      )}
+    </div>
   );
 }

@@ -1,9 +1,8 @@
 "use client";
 
-import { useReadContract } from "wagmi";
+import { useAccount, useReadContract } from "wagmi";
 import aiJudgeAbi from "@/abi/AIJudge";
 import { contractAddress } from "@/config/contract";
-import { ritualChain } from "@/config/wagmi";
 import { shortenAddress } from "@/lib/format";
 import type { JudgeResult } from "@/lib/aiReview";
 import { Card, CardHeader, CardBody, Badge } from "@/components/ui";
@@ -19,18 +18,40 @@ export function SubmissionsList({
   judge?: JudgeResult | null;
   finalWinner?: number;
 }) {
+  const { address } = useAccount();
+  const { data: commitment } = useReadContract({
+    address: contractAddress,
+    abi: aiJudgeAbi,
+    functionName: "getCommitment",
+    args: [bountyId, address ?? "0x0"],
+    query: { enabled: !!address },
+  });
+
   const indices = Array.from({ length: count }, (_, i) => i);
 
   return (
     <Card>
       <CardHeader
         title="Submissions"
-        subtitle="All submissions are judged together after the deadline."
-        action={<Badge tone="zinc">{count}</Badge>}
+        subtitle={`${count} revealed answer(s). Unrevealed commitments stay hidden.`}
+        action={<Badge tone="zinc">{count} revealed</Badge>}
       />
       <CardBody className="space-y-3">
+        {address && commitment && (
+          <div className="mb-3 rounded border border-amber-500/20 bg-amber-500/5 p-2 text-xs">
+            Your commitment:{" "}
+            <span className="font-mono text-amber-400">{commitment[0]?.slice(0, 18)}…</span>
+            {" — "}
+            {commitment[1] ? (
+              <span className="text-green-400">Revealed ✓</span>
+            ) : (
+              <span className="text-zinc-400">Not yet revealed</span>
+            )}
+          </div>
+        )}
+
         {count === 0 ? (
-          <p className="text-sm text-zinc-500">No submissions yet.</p>
+          <p className="text-sm text-zinc-500">No revealed submissions yet.</p>
         ) : (
           indices.map((i) => (
             <SubmissionRow
@@ -62,12 +83,11 @@ function SubmissionRow({
   isWinner?: boolean;
 }) {
   const { data, isLoading } = useReadContract({
-    address: contractAddress,
-    abi: aiJudgeAbi,
+    address: CONTRACT_ADDRESS,
+    abi,
     functionName: "getSubmission",
     args: [bountyId, BigInt(index)],
-    chainId: ritualChain.id,
-    query: { enabled: !!contractAddress },
+    query: { enabled: true },
   });
 
   const submitter = data?.[0];
